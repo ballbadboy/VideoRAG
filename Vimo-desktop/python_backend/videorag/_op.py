@@ -646,7 +646,7 @@ async def videorag_query(
         retrieved_segments,
         key=lambda x: (
             '_'.join(x.split('_')[:-1]), # video_name
-            eval(x.split('_')[-1]) # index
+            int(x.split('_')[-1]) # index
         )
     )
     logger.info(query_for_entity_retrieval)
@@ -705,8 +705,8 @@ async def videorag_query(
     for s_id in caption_results:
         video_name = '_'.join(s_id.split('_')[:-1])
         index = s_id.split('_')[-1]
-        start_time = eval(video_segments._data[video_name][index]["time"].split('-')[0])
-        end_time = eval(video_segments._data[video_name][index]["time"].split('-')[1])
+        start_time = int(video_segments._data[video_name][index]["time"].split('-')[0])
+        end_time = int(video_segments._data[video_name][index]["time"].split('-')[1])
         start_time = f"{start_time // 3600}:{(start_time % 3600) // 60}:{start_time % 60}"
         end_time = f"{end_time // 3600}:{(end_time % 3600) // 60}:{end_time % 60}"
         text_units_section_list.append([video_name, start_time, end_time, caption_results[s_id]])
@@ -811,7 +811,7 @@ async def videorag_query_multiple_choice(
         retrieved_segments,
         key=lambda x: (
             '_'.join(x.split('_')[:-1]), # video_name
-            eval(x.split('_')[-1]) # index
+            int(x.split('_')[-1]) # index
         )
     )
     logger.info(query_for_entity_retrieval)
@@ -870,8 +870,8 @@ async def videorag_query_multiple_choice(
     for s_id in caption_results:
         video_name = '_'.join(s_id.split('_')[:-1])
         index = s_id.split('_')[-1]
-        start_time = eval(video_segments._data[video_name][index]["time"].split('-')[0])
-        end_time = eval(video_segments._data[video_name][index]["time"].split('-')[1])
+        start_time = int(video_segments._data[video_name][index]["time"].split('-')[0])
+        end_time = int(video_segments._data[video_name][index]["time"].split('-')[1])
         start_time = f"{start_time // 3600}:{(start_time % 3600) // 60}:{start_time % 60}"
         end_time = f"{end_time // 3600}:{(end_time % 3600) // 60}:{end_time % 60}"
         text_units_section_list.append([video_name, start_time, end_time, caption_results[s_id]])

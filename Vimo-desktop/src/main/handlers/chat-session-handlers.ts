@@ -19,8 +19,16 @@ async function getStorageDirectory(): Promise<string | null> {
   }
 }
 
+// Validate chat ID to prevent path traversal attacks
+function validateChatId(chatId: string): void {
+  if (!chatId || !/^[a-zA-Z0-9_-]+$/.test(chatId)) {
+    throw new Error(`Invalid chatId: ${chatId}`);
+  }
+}
+
 // Helper function to get individual session file path
 async function getSessionFilePath(chatId: string): Promise<string | null> {
+  validateChatId(chatId);
   const storageDir = await getStorageDirectory();
   if (!storageDir) return null;
   return join(storageDir, `chat-${chatId}.json`);

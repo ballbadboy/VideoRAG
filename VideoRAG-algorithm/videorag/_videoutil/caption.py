@@ -64,7 +64,7 @@ def retrieved_segment_caption(caption_model, caption_tokenizer, refine_knowledge
         index = this_segment.split('_')[-1]
         video_path = video_path_db._data[video_name]
         timestamp = video_segments._data[video_name][index]["time"].split('-')
-        start, end = eval(timestamp[0]), eval(timestamp[1])
+        start, end = int(timestamp[0]), int(timestamp[1])
         video = VideoFileClip(video_path)
         frame_times = np.linspace(start, end, num_sampled_frames, endpoint=False)
         video_frames = encode_video(video, frame_times)

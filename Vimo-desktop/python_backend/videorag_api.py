@@ -7,7 +7,7 @@ import time
 import threading
 import multiprocessing
 import base64
-import pickle
+import secrets
 import requests
 import numpy as np
 from typing import List
@@ -19,6 +19,26 @@ import atexit
 import psutil
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from functools import wraps
+
+# --- API Token Authentication ---
+# Token is generated once at startup and written to the bootstrap file.
+# The Electron main process reads it and includes it in every request.
+API_TOKEN: str = ""
+
+_PUBLIC_ENDPOINTS = {"/api/health"}
+
+def _check_token(f):
+    """Decorator: require valid Bearer token on all non-public endpoints."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if request.path in _PUBLIC_ENDPOINTS:
+            return f(*args, **kwargs)
+        auth = request.headers.get("Authorization", "")
+        if not auth.startswith("Bearer ") or auth[7:] != API_TOKEN:
+            return jsonify({"success": False, "error": "Unauthorized"}), 401
+        return f(*args, **kwargs)
+    return decorated
 from moviepy.editor import VideoFileClip
 import logging
 import warnings
@@ -71,8 +91,17 @@ def read_status_json(file_path: str) -> dict:
         log_to_file(f"⚠️ Failed to read status file {file_path}: {str(e)}")
         return {}
 
+import re as _re
+_CHAT_ID_RE = _re.compile(r'^[a-zA-Z0-9_-]+$')
+
+def validate_chat_id(chat_id: str) -> None:
+    """Raise ValueError if chat_id contains path-traversal characters."""
+    if not chat_id or not _CHAT_ID_RE.match(chat_id):
+        raise ValueError(f"Invalid chat_id: {chat_id!r}")
+
 def get_session_status_file(chat_id: str, base_storage_path: str) -> str:
     """Get session status file path"""
+    validate_chat_id(chat_id)
     session_dir = os.path.join(base_storage_path, f"chat-{chat_id}")
     os.makedirs(session_dir, exist_ok=True)
     return os.path.join(session_dir, "status.json")
@@ -249,13 +278,25 @@ class GlobalImageBindManager:
             self.model_config = None
             log_to_file("🧹 ImageBind manager cleaned up")
 
+def _read_bootstrap_token() -> str:
+    """Read API token from bootstrap file written by the main process."""
+    try:
+        bootstrap_path = os.path.join(os.path.expanduser("~"), ".videorag-bootstrap.json")
+        with open(bootstrap_path, "r", encoding="utf-8") as f:
+            return json.load(f).get("api_token", "")
+    except Exception:
+        return ""
+
 class HTTPImageBindClient:
     """HTTP client, used for subprocess access to ImageBind service"""
-    
-    def __init__(self, base_url: str = "http://localhost:64451"):
+
+    def __init__(self, base_url: str = "http://127.0.0.1:64451", token: str = ""):
         self.base_url = base_url.rstrip('/')
         self.session = requests.Session()
-        self.session.headers.update({'Content-Type': 'application/json'})
+        self.session.headers.update({
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {token}',
+        })
         
     def encode_video_segments(self, video_batch: List[str]) -> np.ndarray:
         """Encode video segments"""
@@ -273,14 +314,16 @@ class HTTPImageBindClient:
             if not result.get("success"):
                 raise RuntimeError(f"API error: {result.get('error')}")
             
-            # Decode base64 string back to numpy array
+            # Decode base64 raw bytes back to numpy array (safe — no code execution)
             result_b64 = result["result"]
             result_bytes = base64.b64decode(result_b64)
-            embeddings = pickle.loads(result_bytes)
-            log_to_file(f"Received embeddings: {embeddings}")
-            
+            dtype = np.dtype(result["dtype"])
+            shape = tuple(result["shape"])
+            embeddings = np.frombuffer(result_bytes, dtype=dtype).reshape(shape)
+            log_to_file(f"Received embeddings shape: {embeddings.shape}")
+
             return embeddings
-            
+
         except Exception as e:
             log_to_file(f"❌ HTTP client video encoding error: {str(e)}")
             raise
@@ -301,13 +344,15 @@ class HTTPImageBindClient:
             if not result.get("success"):
                 raise RuntimeError(f"API error: {result.get('error')}")
             
-            # Decode base64 string back to numpy array
+            # Decode base64 raw bytes back to numpy array (safe — no code execution)
             result_b64 = result["result"]
             result_bytes = base64.b64decode(result_b64)
-            embeddings = pickle.loads(result_bytes)
-            
+            dtype = np.dtype(result["dtype"])
+            shape = tuple(result["shape"])
+            embeddings = np.frombuffer(result_bytes, dtype=dtype).reshape(shape)
+
             return embeddings
-            
+
         except Exception as e:
             log_to_file(f"❌ HTTP client query encoding error: {str(e)}")
             raise
@@ -628,8 +673,8 @@ def index_video_worker_process(chat_id, video_path_list, global_config, server_u
             "current_step": "Initializing"
         })
         
-        # Create HTTP ImageBind client
-        imagebind_client = HTTPImageBindClient(server_url)
+        # Create HTTP ImageBind client (with auth token)
+        imagebind_client = HTTPImageBindClient(server_url, token=_read_bootstrap_token())
         
         # Verify ImageBind service availability
         try:
@@ -749,8 +794,8 @@ def query_worker_process(chat_id, query, global_config, server_url):
             "query": query
         })
         
-        # Create HTTP ImageBind client
-        imagebind_client = HTTPImageBindClient(server_url)
+        # Create HTTP ImageBind client (with auth token)
+        imagebind_client = HTTPImageBindClient(server_url, token=_read_bootstrap_token())
         
         # Verify ImageBind service availability
         try:
@@ -834,11 +879,19 @@ def query_worker_process(chat_id, query, global_config, server_url):
 def create_app():
     """Create Flask application instance"""
     app = Flask(__name__)
-    CORS(app)
-    
+    CORS(app, origins=["app://-", "http://localhost:*"])
+
+    @app.before_request
+    def require_token():
+        if request.path in _PUBLIC_ENDPOINTS:
+            return None
+        auth = request.headers.get("Authorization", "")
+        if not auth.startswith("Bearer ") or auth[7:] != API_TOKEN:
+            return jsonify({"success": False, "error": "Unauthorized"}), 401
+
     # Register all routes
     register_routes(app)
-    
+
     return app
 
 def register_routes(app):
@@ -941,14 +994,14 @@ def register_routes(app):
             # Encode video
             log_to_file(f"🎬 Encoding {video_batch} video segments")
             result = get_imagebind_manager().encode_video_segments(video_batch).numpy()
-            # Convert numpy array to base64 string for transmission
-            result_bytes = pickle.dumps(result)
+            # Convert numpy array to raw bytes (safe — no code execution)
+            result_bytes = result.tobytes()
             result_b64 = base64.b64encode(result_bytes).decode('utf-8')
-            
+
             return jsonify({
                 "success": True,
                 "result": result_b64,
-                "shape": result.shape,
+                "shape": list(result.shape),
                 "dtype": str(result.dtype),
                 "batch_size": len(video_batch)
             })
@@ -975,15 +1028,15 @@ def register_routes(app):
             
             # Encode query
             result = get_imagebind_manager().encode_string_query(query).numpy()
-            
-            # Convert numpy array to base64 string for transmission
-            result_bytes = pickle.dumps(result)
+
+            # Convert numpy array to raw bytes (safe — no code execution)
+            result_bytes = result.tobytes()
             result_b64 = base64.b64encode(result_bytes).decode('utf-8')
-            
+
             return jsonify({
                 "success": True,
                 "result": result_b64,
-                "shape": result.shape,
+                "shape": list(result.shape),
                 "dtype": str(result.dtype),
                 "query": query
             })
@@ -999,7 +1052,10 @@ def register_routes(app):
     def upload_video(chat_id):
         """Upload video for specific chat session and start indexing - asynchronous operation"""
         log_to_file(f"📝 API: Starting async video upload for chat_id: {chat_id}")
-        
+        try:
+            validate_chat_id(chat_id)
+        except ValueError as e:
+            return jsonify({"success": False, "error": str(e)}), 400
         try:
             data = request.json
             video_path_list = data.get('video_path_list', [])
@@ -1048,6 +1104,10 @@ def register_routes(app):
     @app.route('/api/sessions/<chat_id>/status', methods=['GET'])
     def get_indexing_status(chat_id):
         """Get indexing status for specific session"""
+        try:
+            validate_chat_id(chat_id)
+        except ValueError as e:
+            return jsonify({"success": False, "error": str(e)}), 400
         try:
             # Check if this is a query status request
             query_type = request.args.get('type', 'indexing')
@@ -1104,6 +1164,10 @@ def register_routes(app):
     def list_indexed_videos(chat_id):
         """Get list of indexed videos for specific session"""
         try:
+            validate_chat_id(chat_id)
+        except ValueError as e:
+            return jsonify({"success": False, "error": str(e)}), 400
+        try:
             indexed_videos = get_process_manager().get_indexed_videos(chat_id)
             
             return jsonify({
@@ -1123,6 +1187,10 @@ def register_routes(app):
     def terminate_session_processes(chat_id):
         """终止特定session的进程"""
         try:
+            validate_chat_id(chat_id)
+        except ValueError as e:
+            return jsonify({"success": False, "error": str(e)}), 400
+        try:
             terminated = get_process_manager().terminate_process(chat_id)
             
             return jsonify({
@@ -1141,6 +1209,10 @@ def register_routes(app):
     def delete_session(chat_id):
         """删除session及其进程"""
         try:
+            validate_chat_id(chat_id)
+        except ValueError as e:
+            return jsonify({"success": False, "error": str(e)}), 400
+        try:
             get_process_manager().delete_session(chat_id)
             return jsonify({
                 "success": True,
@@ -1157,6 +1229,10 @@ def register_routes(app):
     @app.route('/api/sessions/<chat_id>/query', methods=['POST'])
     def query_video(chat_id):
         """Query video content for specific session - start async processing"""
+        try:
+            validate_chat_id(chat_id)
+        except ValueError as e:
+            return jsonify({"success": False, "error": str(e)}), 400
         try:
             data = request.json
             log_to_file(f"🔍 Query data: {data}")
@@ -1424,12 +1500,32 @@ if __name__ == '__main__':
         # Now it is safe to set multiprocessing start method
         multiprocessing.set_start_method('spawn')
         
+        # Generate a random API token and persist it so Electron can read it
+        API_TOKEN = secrets.token_urlsafe(32)
+        globals()['API_TOKEN'] = API_TOKEN
+
+        bootstrap_path = os.path.join(os.path.expanduser("~"), ".videorag-bootstrap.json")
+        try:
+            existing = {}
+            if os.path.exists(bootstrap_path):
+                with open(bootstrap_path, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+            existing["api_token"] = API_TOKEN
+            existing["port"] = SERVER_PORT
+            tmp = bootstrap_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(existing, f)
+            os.rename(tmp, bootstrap_path)
+            os.chmod(bootstrap_path, 0o600)
+        except Exception as e:
+            log_to_file(f"⚠️ Failed to write bootstrap token: {e}")
+
         log_to_file(f"🚀 Starting VideoRAG API with global ImageBind on port {SERVER_PORT}")
         log_to_file(f"📝 Main process PID: {os.getpid()}")
-        
+
         # Use factory function to create Flask app
         app = create_app()
-        app.run(host='0.0.0.0', port=SERVER_PORT, debug=False, threaded=True)
+        app.run(host='127.0.0.1', port=SERVER_PORT, debug=False, threaded=True)
         
     except KeyboardInterrupt:
         log_to_file("🔔 Received keyboard interrupt")

@@ -4,12 +4,32 @@ import { ChildProcess, spawn } from 'child_process'
 import path from 'path'
 import fs from 'fs'
 
-let VIDEORAG_API_BASE_URL = 'http://localhost:64451/api'
+let VIDEORAG_API_BASE_URL = 'http://127.0.0.1:64451/api'
+let VIDEORAG_API_TOKEN = ''
 
-// Update API base URL
-function updateAPIBaseURL(port: number) {
-  VIDEORAG_API_BASE_URL = `http://localhost:${port}/api`
+// Read API token from bootstrap file written by the Python process
+async function loadAPIToken(): Promise<void> {
+  try {
+    const { readFile } = await import('node:fs/promises')
+    const { join } = await import('node:path')
+    const { homedir } = await import('node:os')
+    const bootstrapPath = join(homedir(), '.videorag-bootstrap.json')
+    const content = await readFile(bootstrapPath, 'utf-8')
+    const data = JSON.parse(content)
+    if (data.api_token) {
+      VIDEORAG_API_TOKEN = data.api_token
+      console.log('🔑 API token loaded from bootstrap file')
+    }
+  } catch {
+    console.warn('⚠️  Could not load API token from bootstrap file')
+  }
+}
+
+// Update API base URL and reload token
+async function updateAPIBaseURL(port: number): Promise<void> {
+  VIDEORAG_API_BASE_URL = `http://127.0.0.1:${port}/api`
   console.log(`📡 Updated API base URL to: ${VIDEORAG_API_BASE_URL}`)
+  await loadAPIToken()
 }
 
 // Python backend process management
@@ -214,7 +234,10 @@ async function callVideoRAGAPI(endpoint: string, method: 'GET' | 'POST' | 'DELET
       method,
       url: `${VIDEORAG_API_BASE_URL}${endpoint}`,
       data,
-      timeout
+      timeout,
+      headers: {
+        Authorization: `Bearer ${VIDEORAG_API_TOKEN}`,
+      },
     })
     return response.data
   } catch (error: any) {
@@ -727,7 +750,7 @@ async function attemptHealthCheck(port: number): Promise<boolean> {
   try {
     const response = await axios({
       method: 'GET',
-      url: `http://localhost:${port}/api/health`,
+      url: `http://127.0.0.1:${port}/api/health`,
       timeout: 5000,
       validateStatus: (status) => status === 200
     })
